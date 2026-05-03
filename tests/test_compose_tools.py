@@ -75,6 +75,7 @@ class ComposeToolTests(unittest.TestCase):
                     side_effect=fake_run_applescript,
                 ),
                 patch("apple_mail_mcp.tools.compose.subprocess.run"),
+                patch("apple_mail_mcp.tools.compose.time.sleep"),
             ):
                 result = compose_tools.create_rich_email_draft(
                     account="Work",
@@ -85,6 +86,49 @@ class ComposeToolTests(unittest.TestCase):
                 )
 
             self.assertIn("Saved in Drafts: yes", result)
+
+    def test_save_as_draft_retries_until_outgoing_message_appears(self):
+        # Mail can take several seconds to register an opened .eml as an
+        # outgoing message; the helper must keep retrying past `not-found`.
+        with patch(
+            "apple_mail_mcp.tools.compose.run_applescript",
+            side_effect=["not-found", "not-found", "saved"],
+        ), patch("apple_mail_mcp.tools.compose.time.sleep"):
+            saved = compose_tools._save_open_message_as_draft(
+                "Re: Quarterly Sync"
+            )
+        self.assertTrue(saved)
+
+    def test_save_as_draft_returns_false_when_retries_exhausted(self):
+        with patch(
+            "apple_mail_mcp.tools.compose.run_applescript",
+            return_value="not-found",
+        ), patch("apple_mail_mcp.tools.compose.time.sleep"):
+            saved = compose_tools._save_open_message_as_draft(
+                "Re: Never Appears", retries=3, initial_delay_seconds=0
+            )
+        self.assertFalse(saved)
+
+    def test_save_as_draft_strips_reply_prefix_for_matching(self):
+        captured_scripts = []
+
+        def fake_run_applescript(script, timeout=120):
+            captured_scripts.append(script)
+            return "saved"
+
+        with patch(
+            "apple_mail_mcp.tools.compose.run_applescript",
+            side_effect=fake_run_applescript,
+        ), patch("apple_mail_mcp.tools.compose.time.sleep"):
+            compose_tools._save_open_message_as_draft(
+                "Re: Re: FWD: Quarterly Sync", initial_delay_seconds=0
+            )
+
+        self.assertTrue(captured_scripts)
+        # The needle injected into the script should have prefixes stripped
+        # and be lowercase, so Mail's subject mutations don't break matching.
+        self.assertIn("quarterly sync", captured_scripts[0])
+        self.assertNotIn("re: re:", captured_scripts[0].lower())
 
 
 if __name__ == "__main__":
