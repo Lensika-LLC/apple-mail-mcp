@@ -101,26 +101,58 @@ def _prepare_rich_bodies(subject, text_body, html_body):
     return plain_body, rich_body, []
 
 
-def _save_open_message_as_draft(subject, retries=10, delay_seconds=0.5):
-    """Ask Mail to save the matching open outgoing message as a draft."""
+def _save_open_message_as_draft(
+    subject, retries=20, delay_seconds=0.5, initial_delay_seconds=1.0
+):
+    """Ask Mail to save the matching open outgoing message as a draft.
+
+    Resilience tactics:
+    - Wait briefly before first attempt; Mail needs a beat to register an
+      opened ``.eml`` as an outgoing message after ``open -a Mail``.
+    - Match subject case-insensitively and via substring containment so that
+      Re:/Fwd: prefixes or whitespace mutations introduced by Mail don't
+      cause false negatives.
+    - Retry across a wider window (default ~10s) since cold Mail launches
+      can be slow on first sync.
+    """
     if not subject:
         return False
 
-    safe_subject = escape_applescript(subject)
+    # Normalize: drop common reply/forward prefixes and lowercase.
+    needle = subject.strip().lower()
+    for prefix in ("re:", "fwd:", "fw:"):
+        while needle.startswith(prefix):
+            needle = needle[len(prefix):].strip()
+    if not needle:
+        needle = subject.strip().lower()
+
+    safe_needle = escape_applescript(needle)
     script = f'''
     tell application "Mail"
         try
-            set matchingMessages to every outgoing message whose subject is "{safe_subject}"
+            set theNeedle to "{safe_needle}"
+            set matchingMessages to {{}}
+            repeat with m in (every outgoing message)
+                set s to subject of m
+                if s is not missing value then
+                    if (do shell script "echo " & quoted form of (s as string) & " | tr '[:upper:]' '[:lower:]'") contains theNeedle then
+                        set end of matchingMessages to m
+                    end if
+                end if
+            end repeat
             if (count of matchingMessages) is 0 then
                 return "not-found"
             end if
-            save item 1 of matchingMessages
+            save item -1 of matchingMessages
             return "saved"
         on error errMsg
             return "error: " & errMsg
         end try
     end tell
     '''
+
+    if initial_delay_seconds > 0:
+        time.sleep(initial_delay_seconds)
 
     for _ in range(retries):
         result = run_applescript(script).strip().lower()
